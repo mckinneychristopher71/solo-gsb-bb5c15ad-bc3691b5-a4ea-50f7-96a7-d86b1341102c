@@ -330,3 +330,163 @@ def test_zero_duration_multiple_inserts(client):
     assert r.status_code == 200
     chars = r.json()["chars"]
     assert [(c["start"], c["end"]) for c in chars] == [(0, 0), (0, 0)]
+
+
+# ---------------------------------------------------------------------------
+# POST /locate-quote：近似引语定位
+# ---------------------------------------------------------------------------
+def _locate(client, text, quote, max_edits, recognized=None, total=1000):
+    return client.post("/locate-quote", json={
+        "recognized": recognized if recognized is not None else rc(
+            [(c, i * 100, i * 100 + 90) for i, c in enumerate(text)]),
+        "total_duration": total,
+        "revised_text": text,
+        "quote": quote,
+        "max_edits": max_edits,
+    })
+
+
+def test_locate_exact_match_with_timeline(client):
+    r = _locate(client, "你好世界呀", "好世界", 0)
+    assert r.status_code == 200, r.text
+    hits = r.json()["hits"]
+    assert len(hits) == 1
+    h = hits[0]
+    assert h["start"] == 1 and h["end"] == 4
+    assert h["text"] == "好世界"
+    assert h["edits"] == 0
+    # 首字符 start=100，末字符 end=390
+    assert h["start_ms"] == 100 and h["end_ms"] == 390
+
+
+def test_locate_fuzzy_substitution_and_overlap(client):
+    # "xaz" 对引语 "xyz" 为 1 次中间替换；其长度 2 的前缀/后缀都不是
+    # 引语删一字所得，因此只有整段一个候选。
+    r = _locate(client, "xaz", "xyz", 1)
+    hits = r.json()["hits"]
+    assert [(h["start"], h["end"], h["text"], h["edits"]) for h in hits] == [
+        (0, 3, "xaz", 1)]
+
+
+def test_locate_insertion_deletion_candidates(client):
+    # "你好呀世界" 引用 "你好世界"：片段整体仅差 1 次删除
+    r = _locate(client, "你好呀世界", "你好世界", 1)
+    hits = r.json()["hits"]
+    assert [(h["start"], h["end"], h["edits"]) for h in hits] == [(0, 5, 1)]
+
+
+def test_locate_prefers_more_non_overlapping_hits(client):
+    # 两个互不重叠的精确命中（各自 0 代价）必须同时返回，
+    # 而不是返回一个跨越二者的近似片段。
+    r = _locate(client, "abcXabc", "abc", 1)
+    hits = r.json()["hits"]
+    assert [(h["start"], h["end"]) for h in hits] == [(0, 3), (4, 7)]
+    assert [h["edits"] for h in hits] == [0, 0]
+
+
+def test_locate_repeated_overlapping_takes_all_nonoverlapping(client):
+    # "aaaa" 引用 "aa"：四处重叠出现里最多取互不重叠的两处
+    r = _locate(client, "aaaa", "aa", 0)
+    assert [(h["start"], h["end"]) for h in r.json()["hits"]] == [
+        (0, 2), (2, 4)]
+
+
+def test_locate_lexicographic_tie_prefers_shorter_earlier(client):
+    # 'a' 精确命中（0 代价）与片段 "ab"（1 次插入）同起点，
+    # 且 'b' 本身是 1 次替换命中：最大命中数为 2，首段取字典序更小的短片段。
+    r = _locate(client, "ab", "a", 1)
+    hits = r.json()["hits"]
+    assert [(h["start"], h["end"], h["text"], h["edits"]) for h in hits] == [
+        (0, 1, "a", 0), (1, 2, "b", 1)]
+
+
+def test_locate_global_minimize_edits(client):
+    # "xabc" 中精确片段 "abc"(1..4,0 代价) 与若干 1 代价片段（"xabc"、
+    # "ab"、"bc"）重叠，最大命中数都为 1，按总编辑代价最小取精确片段。
+    r = _locate(client, "xabc", "abc", 1)
+    hits = r.json()["hits"]
+    assert [(h["start"], h["end"], h["text"], h["edits"]) for h in hits] == [
+        (1, 4, "abc", 0)]
+
+
+def test_locate_no_hit_returns_empty(client):
+    r = _locate(client, "完全不同的内容", "你好", 1)
+    assert r.status_code == 200
+    assert r.json()["hits"] == []
+
+
+def test_locate_distance_exceeded(client):
+    # "abcdef" 与 "abx" 需要 1 次替换：阈值 0 不允许，返回空
+    r = _locate(client, "abcdef", "abx", 0)
+    assert r.json()["hits"] == []
+
+
+def test_locate_empty_revised_text(client):
+    r = _locate(client, "", "a", 0, recognized=[], total=10)
+    assert r.status_code == 200
+    assert r.json()["hits"] == []
+
+
+def test_locate_empty_quote_rejected(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 10,
+        "revised_text": "a", "quote": "", "max_edits": 1})
+    assert r.status_code == 422
+    assert "quote" in r.json()["detail"] or "不能为空" in r.json()["detail"]
+
+
+def test_locate_max_edits_out_of_range(client):
+    for bad in (-1, 3):
+        r = client.post("/locate-quote", json={
+            "recognized": [], "total_duration": 10,
+            "revised_text": "a", "quote": "a", "max_edits": bad})
+        assert r.status_code == 422
+        assert "max_edits" in r.json()["detail"]
+
+
+def test_locate_wrong_type_max_edits(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 10,
+        "revised_text": "a", "quote": "a", "max_edits": "1"})
+    assert r.status_code == 422
+
+
+def test_locate_missing_quote_field(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 10,
+        "revised_text": "a", "max_edits": 1})
+    assert r.status_code == 422
+    assert "quote" in r.json()["detail"]
+
+
+def test_locate_extra_field_rejected(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 10,
+        "revised_text": "a", "quote": "a", "max_edits": 1, "bogus": 1})
+    assert r.status_code == 422
+    assert "不允许" in r.json()["detail"]
+
+
+def test_locate_shares_align_validation(client):
+    # /align 的时间轴校验在 /locate-quote 上同样生效
+    r = client.post("/locate-quote", json={
+        "recognized": [{"char": "a", "start": 300, "end": 100}],
+        "total_duration": 500, "revised_text": "a",
+        "quote": "a", "max_edits": 0})
+    assert r.status_code == 422
+    assert "结束时间" in r.json()["detail"]
+
+
+def test_locate_milliseconds_from_first_and_last_char(client):
+    # 命中片段内包含 computed 字符时，时间仍由首/末字符的时间轴决定
+    payload = {
+        "recognized": rc([("你", 0, 100), ("好", 500, 600)]),
+        "total_duration": 1000,
+        "revised_text": "你呀好",
+        "quote": "你呀好",
+        "max_edits": 0,
+    }
+    r = client.post("/locate-quote", json=payload)
+    assert r.status_code == 200, r.text
+    h = r.json()["hits"][0]
+    assert h["start_ms"] == 0 and h["end_ms"] == 600

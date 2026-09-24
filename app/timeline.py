@@ -22,6 +22,15 @@ def validate_request(req: AlignRequest, max_recognized: int,
             f"修订文本长度 {len(req.revised_text)} 超过上限 {max_revised}，"
             "可通过环境变量 MAX_REVISED_LENGTH 调整")
 
+    quote = getattr(req, "quote", None)
+    if quote is not None:
+        if len(quote) == 0:
+            raise InvalidTimelineError("引语 quote 不能为空字符串")
+        quote_limit = max_revised + 2
+        if len(quote) > quote_limit:
+            raise InvalidTimelineError(
+                f"引语长度 {len(quote)} 超过上限 {quote_limit}")
+
     for idx, item in enumerate(req.recognized):
         if len(item.char) != 1:
             raise InvalidTimelineError(

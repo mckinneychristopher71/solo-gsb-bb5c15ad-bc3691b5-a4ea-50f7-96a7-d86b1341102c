@@ -1,7 +1,13 @@
 """请求/响应数据模型。"""
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+)
 
 
 class RecognizedChar(BaseModel):
@@ -50,6 +56,34 @@ class AlignResponse(BaseModel):
     deleted_count: int = Field(..., description="被删除、未输出的识别字符数")
     matched_count: int = Field(..., description="匹配/替换到识别字符的修订字符数")
     backend: str = Field(..., description="对齐内核：native(C) 或 python")
+
+
+class LocateRequest(AlignRequest):
+    """/locate-quote 请求：沿用 /align 的校时输入，另收引语与编辑次数上限。"""
+
+    quote: str = Field(..., description="要定位的引语，必须为非空字符串")
+    max_edits: StrictInt = Field(
+        ..., description="允许的最小编辑次数（插入/删除/替换），取值 0～2")
+
+    @field_validator("max_edits")
+    @classmethod
+    def _check_max_edits(cls, value: int) -> int:
+        if value < 0 or value > 2:
+            raise ValueError("max_edits 必须为 0～2 的整数")
+        return value
+
+
+class QuoteHit(BaseModel):
+    start: int = Field(..., description="命中片段在修订文本中的起始字符下标（含）")
+    end: int = Field(..., description="命中片段在修订文本中的结束字符下标（不含）")
+    text: str = Field(..., description="命中片段的实际文字")
+    edits: int = Field(..., description="实际编辑次数")
+    start_ms: int = Field(..., description="由首字符时间轴确定的起始毫秒")
+    end_ms: int = Field(..., description="由末字符时间轴确定的结束毫秒")
+
+
+class LocateResponse(BaseModel):
+    hits: list[QuoteHit]
 
 
 class HealthResponse(BaseModel):

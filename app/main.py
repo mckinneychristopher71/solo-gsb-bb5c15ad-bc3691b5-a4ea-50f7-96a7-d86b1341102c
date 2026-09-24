@@ -9,7 +9,14 @@ from fastapi.responses import JSONResponse
 
 from . import alignment
 from .errors import InvalidTimelineError
-from .schemas import AlignRequest, AlignResponse, HealthResponse
+from .locate import locate_quotes
+from .schemas import (
+    AlignRequest,
+    AlignResponse,
+    HealthResponse,
+    LocateRequest,
+    LocateResponse,
+)
 from .timeline import build_timeline, validate_request
 
 
@@ -59,6 +66,8 @@ async def validation_handler(_request: Request,
             messages.append(f"字段 {loc} 必须是字符串")
         elif etype == "extra_forbidden":
             messages.append(f"存在不允许的字段：{loc}")
+        elif etype == "value_error":
+            messages.append(str(err["msg"]).replace("Value error, ", ""))
         else:
             messages.append(f"字段 {loc} 无效：{err['msg']}")
     detail = "；".join(messages) if messages else "请求参数无效"
@@ -77,3 +86,13 @@ async def align(req: AlignRequest) -> AlignResponse:
     validate_request(req, MAX_RECOGNIZED_CHARS, MAX_REVISED_LENGTH)
     result = build_timeline(req, alignment.backend_name())
     return AlignResponse(**result)
+
+
+@app.post("/locate-quote", response_model=LocateResponse, tags=["校时对齐"])
+async def locate_quote(req: LocateRequest) -> LocateResponse:
+    """在修订文本中近似定位引语，返回互不重叠命中及其起止毫秒。"""
+    validate_request(req, MAX_RECOGNIZED_CHARS, MAX_REVISED_LENGTH)
+    timeline = build_timeline(req, alignment.backend_name())
+    hits = locate_quotes(
+        timeline["chars"], req.revised_text, req.quote, req.max_edits)
+    return LocateResponse(hits=hits)
