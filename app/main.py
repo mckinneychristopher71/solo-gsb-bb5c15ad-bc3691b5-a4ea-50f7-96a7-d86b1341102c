@@ -9,7 +9,14 @@ from fastapi.responses import JSONResponse
 
 from . import alignment
 from .errors import InvalidTimelineError
-from .schemas import AlignRequest, AlignResponse, HealthResponse
+from .schemas import (
+    AlignRequest,
+    AlignResponse,
+    HealthResponse,
+    LocateQuoteRequest,
+    QuoteHit,
+)
+from .quote import find_quote_hits
 from .timeline import build_timeline, validate_request
 
 
@@ -26,6 +33,7 @@ def _env_int(name: str, default: int) -> int:
 
 MAX_RECOGNIZED_CHARS = _env_int("MAX_RECOGNIZED_CHARS", 20000)
 MAX_REVISED_LENGTH = _env_int("MAX_REVISED_LENGTH", 20000)
+MAX_QUOTE_LENGTH = _env_int("MAX_QUOTE_LENGTH", 20000)
 
 app = FastAPI(
     title="采访逐字稿校时 API",
@@ -54,9 +62,17 @@ async def validation_handler(_request: Request,
         if etype == "missing":
             messages.append(f"缺少必填字段：{loc}")
         elif etype in ("int_type", "int_parsing"):
-            messages.append(f"字段 {loc} 必须是整数毫秒时间戳")
+            if loc.endswith("max_edits"):
+                messages.append(f"字段 {loc} 必须是整数")
+            else:
+                messages.append(f"字段 {loc} 必须是整数毫秒时间戳")
         elif etype == "string_type":
             messages.append(f"字段 {loc} 必须是字符串")
+        elif etype == "string_too_short":
+            messages.append(f"字段 {loc} 必须是非空字符串")
+        elif etype in ("greater_than_equal", "less_than_equal"):
+            range_hint = "，允许范围为 0～2" if loc.endswith("max_edits") else ""
+            messages.append(f"字段 {loc} 无效{range_hint}")
         elif etype == "extra_forbidden":
             messages.append(f"存在不允许的字段：{loc}")
         else:
@@ -77,3 +93,31 @@ async def align(req: AlignRequest) -> AlignResponse:
     validate_request(req, MAX_RECOGNIZED_CHARS, MAX_REVISED_LENGTH)
     result = build_timeline(req, alignment.backend_name())
     return AlignResponse(**result)
+
+
+@app.post(
+    "/locate-quote",
+    response_model=list[QuoteHit],
+    tags=["校时对齐"],
+)
+async def locate_quote(req: LocateQuoteRequest) -> list[QuoteHit]:
+    """沿修订文本时间轴定位与引语近似匹配的互不重叠片段。"""
+    validate_request(req, MAX_RECOGNIZED_CHARS, MAX_REVISED_LENGTH)
+    if len(req.quote) > MAX_QUOTE_LENGTH:
+        raise InvalidTimelineError(
+            f"引语长度 {len(req.quote)} 超过上限 {MAX_QUOTE_LENGTH}，"
+            "可通过环境变量 MAX_QUOTE_LENGTH 调整")
+
+    timeline = build_timeline(req, alignment.backend_name())
+    hits = find_quote_hits(req.quote, req.revised_text, req.max_edits)
+    return [
+        QuoteHit(
+            start_index=start,
+            end_index=end,
+            text=req.revised_text[start:end],
+            edits=edits,
+            start=timeline["chars"][start].start,
+            end=timeline["chars"][end - 1].end,
+        )
+        for start, end, edits in hits
+    ]

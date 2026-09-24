@@ -11,6 +11,7 @@
 - **删除字符不输出**。
 - 输出时间段严格**按顺序**且**处于录音范围内**；每字符带 `matched`（匹配/替换）或 `computed`（推算）标记。
 - 输入时间无效（负值、起止倒置、越界、乱序、重叠等）返回 **HTTP 422 + 明确中文错误信息**。
+- 支持 `POST /locate-quote`：复用校时输入和逐字时间轴，在修订文本中全局选择互不重叠的近似引语命中。
 - 提供 `/health` 健康检查。
 - 对齐内核为 **C（ctypes 调用）**，无编译器时自动回退**纯 Python** 实现，二者算法一致。
 
@@ -26,6 +27,8 @@ docker compose up --build -d
 
 - API 地址：`http://localhost:8000`
 - 健康检查：`GET http://localhost:8000/health`
+- 校时接口：`POST http://localhost:8000/align`
+- 引语定位接口：`POST http://localhost:8000/locate-quote`
 - 交互式文档：`http://localhost:8000/docs`（OpenAPI：`/openapi.json`）
 
 停止：
@@ -49,6 +52,7 @@ docker compose down
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `MAX_RECOGNIZED_CHARS` | `20000` | 识别字符数量上限 |
 | `MAX_REVISED_LENGTH` | `20000` | 修订文本长度上限 |
+| `MAX_QUOTE_LENGTH` | `20000` | `/locate-quote` 引语长度上限 |
 | `ALIGN_NATIVE` | `1` | `1` 优先 C 内核；`0` 强制纯 Python 后备内核 |
 | `UVICORN_EXTRA_ARGS` | （空） | 透传给 uvicorn 的额外参数 |
 
@@ -134,6 +138,62 @@ curl -X POST http://localhost:8000/align \
   - `computed`：新增字符，时间在相邻锚点/录音边界空档内均匀推算。
 - 时间保证：`0 ≤ start ≤ end ≤ total_duration`，且相邻字符时间不回退。
 
+### `POST /locate-quote`
+
+在执行与 `/align` 完全相同的输入校验和逐字校时后，从 `revised_text` 中查找与
+`quote` 的 **Levenshtein 编辑距离**（插入、删除、替换）不超过 `max_edits` 的连续非空片段。
+
+请求体包含 `/align` 的全部字段，另加：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `quote` | 字符串 | 待定位引语，必须非空，默认长度不超过 20,000 字符 |
+| `max_edits` | 整数 | 最大编辑次数，允许 `0`、`1`、`2` |
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/locate-quote \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recognized": [
+      {"char":"你","start":0,"end":100},
+      {"char":"好","start":200,"end":300},
+      {"char":"世","start":500,"end":600},
+      {"char":"界","start":700,"end":800}
+    ],
+    "total_duration": 1000,
+    "revised_text": "你好呀世界",
+    "quote": "你好世界",
+    "max_edits": 1
+  }'
+```
+
+响应：
+
+```json
+[
+  {
+    "start_index": 0,
+    "end_index": 5,
+    "text": "你好呀世界",
+    "edits": 1,
+    "start": 0,
+    "end": 800
+  }
+]
+```
+
+字段说明：
+
+- `start_index` / `end_index`：命中片段在 `revised_text` 中的字符下标；`end_index` 为半开区间（不含）。
+- `text`：修订文本中实际命中的连续文字。
+- `edits`：实际插入、删除、替换次数；仅保留 `edits <= max_edits` 的片段。
+- `start` / `end`：分别取命中片段首字符时间轴的 `start` 和末字符时间轴的 `end`（毫秒）。
+- 同一位置可能同时存在多个近似片段。接口会在所有候选中先选出**互不重叠**集合：
+  依次最大化命中数量、最小化 `edits` 总和；仍同分时，选择下标序列字典序最小者，并按原文顺序返回。
+- 没有命中时返回 `[]`。
+
 ### 输入校验（HTTP 422）
 
 例如 `end < start`：
@@ -143,7 +203,8 @@ curl -X POST http://localhost:8000/align \
 ```
 
 覆盖：负时间、结束早于起始、超出录音总时长、未按起始时间排序、时间区间重叠、
-识别字符多于/少于 1 个、字段缺失或类型错误、超出规模上限等。
+识别字符多于/少于 1 个、字段缺失或类型错误、超出规模上限、`quote` 为空或超长、
+`max_edits` 不在 0～2 等。
 
 ---
 
@@ -192,6 +253,7 @@ app/
   main.py            FastAPI 应用、路由与中文错误处理
   schemas.py         请求/响应模型
   timeline.py        输入校验、对齐调度、新增字符空档均分
+  quote.py           近似引语片段枚举与全局互不重叠最优选择
   alignment.py       内核加载（C → 即时编译 → 纯 Python）
   align_py.py        纯 Python 后备内核
   native/align_c.c   C 对齐内核源码

@@ -27,6 +27,16 @@ class AlignRequest(BaseModel):
     revised_text: str = Field(..., description="人工修订后的完整文本")
 
 
+class LocateQuoteRequest(AlignRequest):
+    """校时输入与引语定位参数。"""
+
+    quote: str = Field(..., min_length=1, description="待查找的非空引语")
+    max_edits: StrictInt = Field(
+        ..., ge=0, le=2,
+        description="允许的插入、删除、替换最大总次数（0～2）",
+    )
+
+
 class RevisedCharTimeline(BaseModel):
     char: str = Field(..., description="修订文本中的字符")
     start: int = Field(..., description="起始时间（毫秒）")
@@ -50,6 +60,15 @@ class AlignResponse(BaseModel):
     deleted_count: int = Field(..., description="被删除、未输出的识别字符数")
     matched_count: int = Field(..., description="匹配/替换到识别字符的修订字符数")
     backend: str = Field(..., description="对齐内核：native(C) 或 python")
+
+
+class QuoteHit(BaseModel):
+    start_index: int = Field(..., description="命中片段在修订文本中的起始字符下标（从 0 开始，半开区间）")
+    end_index: int = Field(..., description="命中片段在修订文本中的结束字符下标（不含该位置）")
+    text: str = Field(..., description="修订文本中实际命中的文字")
+    edits: int = Field(..., description="实际插入、删除、替换总次数")
+    start: int = Field(..., description="起始时间（毫秒），取首字符时间轴的 start")
+    end: int = Field(..., description="结束时间（毫秒），取末字符时间轴的 end")
 
 
 class HealthResponse(BaseModel):

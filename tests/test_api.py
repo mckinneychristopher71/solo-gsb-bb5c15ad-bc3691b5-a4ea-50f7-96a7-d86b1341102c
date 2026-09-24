@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.alignment import align_chars  # noqa: E402
 from app.main import app  # noqa: E402
+from app.quote import find_quote_hits  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
@@ -330,3 +331,108 @@ def test_zero_duration_multiple_inserts(client):
     assert r.status_code == 200
     chars = r.json()["chars"]
     assert [(c["start"], c["end"]) for c in chars] == [(0, 0), (0, 0)]
+
+
+# ---------------------------------------------------------------------------
+# 引语近似定位
+# ---------------------------------------------------------------------------
+def test_quote_finder_exact_repeats():
+    assert find_quote_hits("abc", "xabcxabc", 1) == [
+        (1, 4, 0), (5, 8, 0)]
+
+
+def test_quote_finder_uses_insertion():
+    assert find_quote_hits("你好世界", "你好呀世界", 1) == [(0, 5, 1)]
+
+
+def test_quote_finder_overlapping_choice_prefers_more_hits():
+    # 长度 2 的引语与任一单字符距离均为 1，因此四个互不重叠单字符优先于两个较长命中。
+    assert find_quote_hits("ab", "aabb", 1) == [
+        (0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 4, 1)]
+
+
+def test_quote_finder_tie_uses_lower_edit_cost():
+    # 同一文本内较短片段可消耗 1 次删除命中；零编辑完整片段优先。
+    assert find_quote_hits("abc", "abc", 1) == [(0, 3, 0)]
+
+
+def test_locate_quote_returns_timeline_ranges(client):
+    payload = {
+        "recognized": rc([
+            ("你", 0, 100), ("好", 200, 300), ("世", 500, 600),
+            ("界", 700, 800),
+        ]),
+        "total_duration": 1000,
+        "revised_text": "你好呀世界",
+        "quote": "你好世界",
+        "max_edits": 1,
+    }
+    r = client.post("/locate-quote", json=payload)
+    assert r.status_code == 200, r.text
+    assert r.json() == [{
+        "start_index": 0,
+        "end_index": 5,
+        "text": "你好呀世界",
+        "edits": 1,
+        "start": 0,
+        "end": 800,
+    }]
+
+
+def test_locate_quote_empty_array_when_no_hit(client):
+    payload = {
+        "recognized": rc([("a", 0, 100)]),
+        "total_duration": 200,
+        "revised_text": "a",
+        "quote": "zzz",
+        "max_edits": 2,
+    }
+    r = client.post("/locate-quote", json=payload)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_locate_quote_reuses_alignment_validation(client):
+    payload = {
+        "recognized": rc([("a", 300, 100)]),
+        "total_duration": 500,
+        "revised_text": "a",
+        "quote": "a",
+        "max_edits": 0,
+    }
+    r = client.post("/locate-quote", json=payload)
+    assert r.status_code == 422
+    assert "结束时间" in r.json()["detail"]
+
+
+def test_locate_quote_empty_quote_rejected(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 0, "revised_text": "",
+        "quote": "", "max_edits": 0})
+    assert r.status_code == 422
+    assert "非空" in r.json()["detail"]
+
+
+def test_locate_quote_max_edits_range(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 0, "revised_text": "",
+        "quote": "a", "max_edits": 3})
+    assert r.status_code == 422
+    assert "0～2" in r.json()["detail"]
+
+
+def test_locate_quote_extra_field_rejected(client):
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 0, "revised_text": "",
+        "quote": "a", "max_edits": 0, "bogus": 1})
+    assert r.status_code == 422
+    assert "不允许" in r.json()["detail"]
+
+
+def test_locate_quote_too_long_rejected(client, monkeypatch):
+    monkeypatch.setattr("app.main.MAX_QUOTE_LENGTH", 2)
+    r = client.post("/locate-quote", json={
+        "recognized": [], "total_duration": 0, "revised_text": "abc",
+        "quote": "abc", "max_edits": 0})
+    assert r.status_code == 422
+    assert "引语长度" in r.json()["detail"]
